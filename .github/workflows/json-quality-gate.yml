@@ -16,6 +16,8 @@ jobs:
     name: Validate JSON Reports
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    env:
+      SKIP_AI_CHECK: ${{ vars.SKIP_AI_CHECK || 'false' }}
 
     steps:
       # Step 1: Checkout base branch (main) to get TRUSTED validation scripts.
@@ -74,8 +76,13 @@ jobs:
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
         run: |
-          python3 ../base/scripts/ai_quality_check.py ${{ steps.changed-files.outputs.all_changed_files }} > /tmp/ai_results.json
-          cat /tmp/ai_results.json
+          if [ "$SKIP_AI_CHECK" = "true" ]; then
+            echo '{"pass": true, "error": "AI analysis skipped by SKIP_AI_CHECK", "files": {}}' > /tmp/ai_results.json
+            echo "[AI] 已跳过（SKIP_AI_CHECK=true）"
+          else
+            python3 ../base/scripts/ai_quality_check.py ${{ steps.changed-files.outputs.all_changed_files }} > /tmp/ai_results.json
+            cat /tmp/ai_results.json
+          fi
 
       - name: Post results as Check Run and PR comment
         if: steps.changed-files.outputs.any_changed == 'true'
@@ -251,18 +258,25 @@ jobs:
           {
             echo "## JSON 质量门禁"
             echo ""
-            echo "| 文件 | 检查结果 | Token 消耗 | 费用 |"
-            echo "|------|---------|-----------|------|"
             python3 -c "
           import json
           with open('/tmp/deterministic_results.json') as f:
               det = json.load(f)
           ai_avail = False
+          ai_skipped = '${{ env.SKIP_AI_CHECK }}' == 'true'
           try:
               with open('/tmp/ai_results.json') as f:
                   ai = json.load(f)
-              ai_avail = not ai.get('error')
+              # AI is available if no error and not skipped
+              ai_avail = not ai.get('error') and not ai_skipped
           except: pass
+          # Header
+          if ai_avail:
+              print('| 文件 | 检查结果 | Token 消耗 | 费用 |')
+              print('|------|---------|-----------|------|')
+          else:
+              print('| 文件 | 检查结果 |')
+              print('|------|---------|')
           total_cost = 0
           total_tokens = 0
           for path, info in sorted(det.get('files', {}).items()):
@@ -275,8 +289,6 @@ jobs:
               elif warnings: status = f'⚠️ {warnings}W'
               elif notices: status = f'ℹ️ {notices}N'
               else: status = '✅ 通过'
-              token_str = '-'
-              cost_str = '-'
               if ai_avail:
                   ai_info = ai.get('files', {}).get(path, {})
                   meta = ai_info.get('_meta', {})
@@ -290,7 +302,11 @@ jobs:
                       cost_str = f'¥{cost:.4f}'
                       total_cost += cost
                       total_tokens += tok
-              print(f'| {name} | {status} | {token_str} | {cost_str} |')
+                      print(f'| {name} | {status} | {token_str} | {cost_str} |')
+                  else:
+                      print(f'| {name} | {status} | - | - |')
+              else:
+                  print(f'| {name} | {status} |')
           if total_cost > 0:
               print(f'| **合计** | | **{total_tokens}** | **¥{total_cost:.4f}** |')
           " 2>/dev/null || echo "| - | 结果解析失败 | - |"
